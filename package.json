@@ -4,10 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "prepare:engine": "node scripts/copy-stockfish.mjs",
+    "dev": "npm run prepare:engine && vite",
+    "build": "npm run prepare:engine && tsc -b && vite build",
     "preview": "vite preview",
-    "postinstall": "node scripts/copy-stockfish.mjs"
+    "postinstall": "npm run prepare:engine"
   },
   "dependencies": {
     "chess.js": "^1.4.0",
