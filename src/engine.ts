@@ -33,11 +33,22 @@ export class StockfishEngine {
   constructor() {
     this.worker = new Worker('/stockfish/stockfish-18-lite-single.js')
     this.worker.onmessage = (event) => this.handleMessage(String(event.data))
+    this.worker.onerror = () => {
+      const error = new Error('O Web Worker do Stockfish falhou durante a execução.')
+      if (this.pending) {
+        window.clearTimeout(this.pending.timeoutId)
+        this.pending.reject(error)
+        this.pending = null
+      }
+    }
 
     this.ready = new Promise((resolve, reject) => {
+      let settled = false
       const timeoutId = window.setTimeout(() => {
+        if (settled) return
+        settled = true
         cleanup()
-        reject(new Error('Stockfish não respondeu durante a inicialização. Verifique se public/stockfish foi preparado.'))
+        reject(new Error('Stockfish não respondeu durante a inicialização. Verifique os arquivos em public/stockfish.'))
       }, ENGINE_READY_TIMEOUT_MS)
 
       const cleanup = () => {
@@ -47,6 +58,8 @@ export class StockfishEngine {
       }
 
       const onError = () => {
+        if (settled) return
+        settled = true
         cleanup()
         reject(new Error('Falha ao carregar o Web Worker do Stockfish.'))
       }
@@ -57,7 +70,8 @@ export class StockfishEngine {
           this.worker.postMessage('isready')
           return
         }
-        if (message === 'readyok') {
+        if (message === 'readyok' && !settled) {
+          settled = true
           cleanup()
           resolve()
         }
@@ -77,11 +91,11 @@ export class StockfishEngine {
       this.worker.postMessage('setoption name UCI_LimitStrength value false')
       this.worker.postMessage(`setoption name MultiPV value ${Math.max(1, Math.min(5, multiPv))}`)
       this.worker.postMessage(`position fen ${fen}`)
-      return this.startSearch(fen, `go depth ${depth}`)
+      return this.startSearch(fen, `go depth ${Math.max(1, depth)}`)
     })
   }
 
-  bestMove(fen: string, elo = 1400, moveTimeMs = 450): Promise<string> {
+  bestMove(fen: string, elo = 1500, moveTimeMs = 450): Promise<string> {
     return this.enqueue(async () => {
       await this.ready
       this.ensureAlive()
@@ -92,20 +106,31 @@ export class StockfishEngine {
       this.worker.postMessage(`position fen ${fen}`)
 
       try {
-        const result = await this.startSearch(fen, `go movetime ${moveTimeMs}`)
+        const result = await this.startSearch(fen, `go movetime ${Math.max(100, moveTimeMs)}`)
         if (!result.bestMove || result.bestMove === '(none)') {
           throw new Error('Stockfish não retornou um lance válido.')
         }
         return result.bestMove
       } finally {
-        if (!this.destroyed) {
-          this.worker.postMessage('setoption name UCI_LimitStrength value false')
-        }
+        if (!this.destroyed) this.worker.postMessage('setoption name UCI_LimitStrength value false')
       }
     })
   }
 
+  stop() {
+    if (!this.destroyed) this.worker.postMessage('stop')
+  }
+
+  async newGame() {
+    await this.ready
+    this.ensureAlive()
+    this.stop()
+    this.worker.postMessage('ucinewgame')
+    this.worker.postMessage('isready')
+  }
+
   destroy() {
+    if (this.destroyed) return
     this.destroyed = true
     if (this.pending) {
       window.clearTimeout(this.pending.timeoutId)
@@ -120,8 +145,9 @@ export class StockfishEngine {
       const timeoutId = window.setTimeout(() => {
         if (!this.pending || this.pending.fen !== fen) return
         this.worker.postMessage('stop')
+        const pending = this.pending
         this.pending = null
-        reject(new Error('A análise do Stockfish excedeu o tempo limite.'))
+        pending.reject(new Error('A análise do Stockfish excedeu o tempo limite.'))
       }, ENGINE_SEARCH_TIMEOUT_MS)
 
       this.pending = { resolve, reject, lines: new Map(), fen, timeoutId }
