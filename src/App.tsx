@@ -10,7 +10,7 @@ const PIECES: Record<string, string> = {
 
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] as const
 const RANKS = ['8', '7', '6', '5', '4', '3', '2', '1'] as const
-const SQUARES = RANKS.flatMap((rank) => FILES.map((file) => `${file}${rank}` as Square))
+const ALL_SQUARES = RANKS.flatMap((rank) => FILES.map((file) => `${file}${rank}` as Square))
 const PROMOTIONS: Array<{ piece: PieceSymbol; label: string }> = [
   { piece: 'q', label: 'Dama' },
   { piece: 'r', label: 'Torre' },
@@ -19,21 +19,23 @@ const PROMOTIONS: Array<{ piece: PieceSymbol; label: string }> = [
 ]
 
 type LastMove = { from: Square; to: Square } | null
-
-type PendingPromotion = {
-  from: Square
-  to: Square
-}
+type PendingPromotion = { from: Square; to: Square } | null
 
 type ReviewMove = {
   ply: number
-  color: Color
   san: string
   actual: string
   best: string
   loss: number
   label: string
   eval: number
+}
+
+function cloneGame(source: Chess) {
+  const clone = new Chess()
+  const pgn = source.pgn()
+  if (pgn) clone.loadPgn(pgn)
+  return clone
 }
 
 function uciToMove(uci: string) {
@@ -44,18 +46,15 @@ function uciToMove(uci: string) {
   }
 }
 
-function cloneGame(source: Chess) {
-  const clone = new Chess()
-  const pgn = source.pgn()
-  if (pgn) clone.loadPgn(pgn)
-  return clone
-}
-
 function scoreOf(analysis: EngineAnalysis) {
   const line = analysis.lines[0]
   if (!line) return 0
   if (line.mate !== null) return Math.sign(line.mate) * (10000 - Math.min(99, Math.abs(line.mate)))
   return line.scoreCp ?? 0
+}
+
+function scoreForSide(whiteScore: number, side: Color) {
+  return side === 'w' ? whiteScore : -whiteScore
 }
 
 function displayEval(cp: number) {
@@ -73,23 +72,34 @@ function classify(loss: number, isBest: boolean) {
   return 'Erro grave'
 }
 
-function gameResult(game: Chess) {
-  if (!game.isGameOver()) return null
-  if (game.isCheckmate()) return game.turn() === 'w' ? 'Stockfish venceu por xeque-mate.' : 'Você venceu por xeque-mate.'
-  if (game.isStalemate()) return 'Empate por afogamento.'
-  if (game.isThreefoldRepetition()) return 'Empate por repetição tripla.'
-  if (game.isInsufficientMaterial()) return 'Empate por material insuficiente.'
-  return 'Partida encerrada em empate.'
+function displayedSquares(side: Color) {
+  const files = side === 'w' ? [...FILES] : [...FILES].reverse()
+  const ranks = side === 'w' ? [...RANKS] : [...RANKS].reverse()
+  return ranks.flatMap((rank) => files.map((file) => `${file}${rank}` as Square))
+}
+
+function isLightSquare(square: Square) {
+  const file = FILES.indexOf(square[0] as (typeof FILES)[number])
+  const rank = Number(square[1])
+  return (file + rank) % 2 === 0
 }
 
 function findCheckedKing(game: Chess): Square | null {
   if (!game.inCheck()) return null
-  const color = game.turn()
-  for (const square of SQUARES) {
+  for (const square of ALL_SQUARES) {
     const piece = game.get(square)
-    if (piece?.type === 'k' && piece.color === color) return square
+    if (piece?.type === 'k' && piece.color === game.turn()) return square
   }
   return null
+}
+
+function gameResult(game: Chess) {
+  if (!game.isGameOver()) return null
+  if (game.isCheckmate()) return game.turn() === 'w' ? 'Pretas venceram por xeque-mate.' : 'Brancas venceram por xeque-mate.'
+  if (game.isStalemate()) return 'Empate por afogamento.'
+  if (game.isThreefoldRepetition()) return 'Empate por repetição tripla.'
+  if (game.isInsufficientMaterial()) return 'Empate por material insuficiente.'
+  return 'Partida encerrada em empate.'
 }
 
 function explainMove(game: Chess, uci: string) {
@@ -105,8 +115,8 @@ function explainMove(game: Chess, uci: string) {
   const reasons: string[] = []
   if (move.isCapture()) reasons.push(`captura em ${move.to}`)
   if (probe.inCheck()) reasons.push('cria xeque')
-  if (move.isKingsideCastle() || move.isQueensideCastle()) reasons.push('coloca o rei em segurança com o roque')
-  if (['d4', 'd5', 'e4', 'e5'].includes(move.to)) reasons.push('reforça o controle do centro')
+  if (move.isKingsideCastle() || move.isQueensideCastle()) reasons.push('melhora a segurança do rei com o roque')
+  if (['d4', 'd5', 'e4', 'e5'].includes(move.to)) reasons.push('aumenta o controle do centro')
   if (['n', 'b'].includes(move.piece) && ['1', '8'].includes(move.from[1])) reasons.push('desenvolve uma peça')
   if (move.isPromotion()) reasons.push('promove um peão')
   if (!reasons.length) reasons.push('melhora a coordenação e a avaliação global da posição')
@@ -115,82 +125,62 @@ function explainMove(game: Chess, uci: string) {
 
 function pvToSan(fen: string, pv: string[]) {
   const game = new Chess(fen)
-  const result: string[] = []
+  const san: string[] = []
   for (const uci of pv.slice(0, 6)) {
     try {
-      const move = game.move(uciToMove(uci))
-      result.push(move.san)
+      san.push(game.move(uciToMove(uci)).san)
     } catch {
       break
     }
   }
-  return result.join(' ')
+  return san.join(' ')
 }
 
-function Arrow({ move }: { move?: string }) {
-  if (!move || move.length < 4) return null
-  const center = (square: string) => {
-    const x = FILES.indexOf(square[0] as (typeof FILES)[number]) + 0.5
-    const rank = Number(square[1])
-    return { x: x * 12.5, y: (8.5 - rank) * 12.5 }
-  }
-  const from = center(move.slice(0, 2))
-  const to = center(move.slice(2, 4))
-  return (
-    <svg className="hint-arrow" viewBox="0 0 100 100" aria-hidden="true">
-      <defs>
-        <marker id="arrowhead" markerWidth="4" markerHeight="4" refX="3" refY="2" orient="auto">
-          <path d="M0,0 L4,2 L0,4 Z" />
-        </marker>
-      </defs>
-      <line x1={from.x} y1={from.y} x2={to.x} y2={to.y} markerEnd="url(#arrowhead)" />
-    </svg>
-  )
+function terminalScore(game: Chess, side: Color) {
+  if (!game.isGameOver() || !game.isCheckmate()) return 0
+  const winner: Color = game.turn() === 'w' ? 'b' : 'w'
+  return winner === side ? 10000 : -10000
 }
 
 export default function App() {
   const gameRef = useRef(new Chess())
-  const coachEngineRef = useRef<StockfishEngine | null>(null)
-  const opponentEngineRef = useRef<StockfishEngine | null>(null)
+  const engineRef = useRef<StockfishEngine | null>(null)
+  const requestRef = useRef(0)
   const sessionRef = useRef(0)
-  const coachRequestRef = useRef(0)
 
+  const [playerSide, setPlayerSide] = useState<Color | null>(null)
   const [fen, setFen] = useState(gameRef.current.fen())
   const [selected, setSelected] = useState<Square | null>(null)
   const [lastMove, setLastMove] = useState<LastMove>(null)
   const [analysis, setAnalysis] = useState<EngineAnalysis | null>(null)
-  const [coachThinking, setCoachThinking] = useState(false)
-  const [opponentThinking, setOpponentThinking] = useState(false)
-  const [engineElo, setEngineElo] = useState(1500)
-  const [showHint, setShowHint] = useState(true)
-  const [review, setReview] = useState<ReviewMove[]>([])
+  const [thinking, setThinking] = useState(false)
   const [reviewing, setReviewing] = useState(false)
+  const [showHint, setShowHint] = useState(true)
   const [engineError, setEngineError] = useState<string | null>(null)
-  const [pendingPromotion, setPendingPromotion] = useState<PendingPromotion | null>(null)
+  const [pendingPromotion, setPendingPromotion] = useState<PendingPromotion>(null)
+  const [review, setReview] = useState<ReviewMove[]>([])
 
   const game = useMemo(() => cloneGame(gameRef.current), [fen])
+  const boardSquares = useMemo(() => displayedSquares(playerSide ?? 'w'), [playerSide])
   const history = game.history()
   const checkedKing = findCheckedKing(game)
   const result = gameResult(game)
   const legalMoves = useMemo(() => selected ? game.moves({ square: selected, verbose: true }) : [], [game, selected])
   const legalTargets = useMemo(() => new Set(legalMoves.map((move) => move.to)), [legalMoves])
-  const evalCp = analysis ? scoreOf(analysis) : 0
-  const bestMove = analysis?.bestMove
-  const boardLocked = opponentThinking || reviewing || game.isGameOver() || game.turn() !== 'w'
+  const bestMove = playerSide && game.turn() === playerSide ? analysis?.bestMove : undefined
+  const hintFrom = showHint && bestMove ? bestMove.slice(0, 2) : null
+  const hintTo = showHint && bestMove ? bestMove.slice(2, 4) : null
+  const userEval = playerSide && analysis ? scoreForSide(scoreOf(analysis), playerSide) : 0
+  const isMyTurn = Boolean(playerSide && game.turn() === playerSide)
+  const boardLocked = reviewing || game.isGameOver() || !playerSide
 
   useEffect(() => {
-    const coachEngine = new StockfishEngine()
-    const opponentEngine = new StockfishEngine()
-    coachEngineRef.current = coachEngine
-    opponentEngineRef.current = opponentEngine
-    void refreshCoach(gameRef.current, sessionRef.current)
-
+    const engine = new StockfishEngine()
+    engineRef.current = engine
     return () => {
-      coachRequestRef.current += 1
-      coachEngine.destroy()
-      opponentEngine.destroy()
+      requestRef.current += 1
+      engine.destroy()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   function commitGame(next: Chess, move: LastMove) {
@@ -201,64 +191,58 @@ export default function App() {
     setPendingPromotion(null)
   }
 
-  async function refreshCoach(position: Chess, session: number) {
-    const engine = coachEngineRef.current
+  async function analyzePosition(position: Chess, side: Color, session: number) {
+    const engine = engineRef.current
     if (!engine || position.isGameOver()) {
       setAnalysis(null)
+      setThinking(false)
       return
     }
 
     const expectedFen = position.fen()
-    const requestId = ++coachRequestRef.current
+    const requestId = ++requestRef.current
     engine.stop()
-    setCoachThinking(true)
-
-    try {
-      const response = await engine.analyze(expectedFen, 14, 3)
-      if (sessionRef.current !== session) return
-      if (coachRequestRef.current !== requestId) return
-      if (gameRef.current.fen() !== expectedFen) return
-      setAnalysis(response)
-      setEngineError(null)
-    } catch (error) {
-      if (coachRequestRef.current !== requestId || sessionRef.current !== session) return
-      setEngineError(error instanceof Error ? error.message : 'Não foi possível analisar a posição.')
-    } finally {
-      if (coachRequestRef.current === requestId) setCoachThinking(false)
-    }
-  }
-
-  async function playComputer(position: Chess, session: number) {
-    const engine = opponentEngineRef.current
-    if (!engine || position.isGameOver()) return
-
-    const expectedFen = position.fen()
-    setOpponentThinking(true)
-    setAnalysis(null)
+    setThinking(true)
     setEngineError(null)
 
     try {
-      const uci = await engine.bestMove(expectedFen, engineElo, 500)
-      if (sessionRef.current !== session || gameRef.current.fen() !== expectedFen) return
-
-      const moveData = uciToMove(uci)
-      const next = cloneGame(position)
-      const move = next.move(moveData)
-      commitGame(next, { from: move.from, to: move.to })
-
-      if (!next.isGameOver()) void refreshCoach(next, session)
+      const response = await engine.analyze(expectedFen, position.turn() === side ? 14 : 11, position.turn() === side ? 3 : 1)
+      if (requestRef.current !== requestId || sessionRef.current !== session) return
+      if (gameRef.current.fen() !== expectedFen) return
+      setAnalysis(response)
     } catch (error) {
-      if (sessionRef.current === session && gameRef.current.fen() === expectedFen) {
-        setEngineError(error instanceof Error ? error.message : 'O adversário não conseguiu calcular a resposta.')
-      }
+      if (requestRef.current !== requestId || sessionRef.current !== session) return
+      setEngineError(error instanceof Error ? error.message : 'Não foi possível analisar a posição.')
     } finally {
-      if (sessionRef.current === session) setOpponentThinking(false)
+      if (requestRef.current === requestId) setThinking(false)
     }
   }
 
-  function executeHumanMove(from: Square, to: Square, promotion?: PieceSymbol) {
+  function startWithSide(side: Color) {
+    sessionRef.current += 1
+    requestRef.current += 1
+    engineRef.current?.stop()
+    const next = new Chess()
+    gameRef.current = next
+    setPlayerSide(side)
+    setFen(next.fen())
+    setSelected(null)
+    setLastMove(null)
+    setAnalysis(null)
+    setReview([])
+    setEngineError(null)
+    setPendingPromotion(null)
+    setThinking(false)
+    void analyzePosition(next, side, sessionRef.current)
+  }
+
+  function executeMove(from: Square, to: Square, promotion?: PieceSymbol) {
     if (boardLocked) return
     const current = cloneGame(gameRef.current)
+    const movingColor = current.turn()
+    const piece = current.get(from)
+    if (!piece || piece.color !== movingColor) return
+
     const candidates = current.moves({ square: from, verbose: true }).filter((move) => move.to === to)
     if (!candidates.length) {
       setSelected(null)
@@ -272,15 +256,12 @@ export default function App() {
 
     try {
       const move = current.move({ from, to, promotion })
-      const session = sessionRef.current
-      coachRequestRef.current += 1
-      coachEngineRef.current?.stop()
-      setCoachThinking(false)
+      requestRef.current += 1
+      engineRef.current?.stop()
       setAnalysis(null)
       setReview([])
       commitGame(current, { from: move.from, to: move.to })
-
-      if (!current.isGameOver()) void playComputer(current, session)
+      if (playerSide && !current.isGameOver()) void analyzePosition(current, playerSide, sessionRef.current)
     } catch {
       setSelected(null)
     }
@@ -292,20 +273,20 @@ export default function App() {
     const piece = current.get(square)
 
     if (!selected) {
-      if (piece?.color === 'w') setSelected(square)
+      if (piece?.color === current.turn()) setSelected(square)
       return
     }
 
-    if (piece?.color === 'w') {
+    if (piece?.color === current.turn()) {
       setSelected(square)
       return
     }
 
-    executeHumanMove(selected, square)
+    executeMove(selected, square)
   }
 
   function dragStart(square: Square, event: React.DragEvent) {
-    if (boardLocked || gameRef.current.get(square)?.color !== 'w') {
+    if (boardLocked || gameRef.current.get(square)?.color !== gameRef.current.turn()) {
       event.preventDefault()
       return
     }
@@ -318,253 +299,253 @@ export default function App() {
     event.preventDefault()
     if (boardLocked) return
     const from = event.dataTransfer.getData('text/plain') as Square
-    if (from && SQUARES.includes(from)) executeHumanMove(from, square)
+    if (from && ALL_SQUARES.includes(from)) executeMove(from, square)
   }
 
-  function resetGame() {
+  function undoMove() {
+    if (reviewing || !history.length || !playerSide) return
     sessionRef.current += 1
-    coachRequestRef.current += 1
-    coachEngineRef.current?.stop()
-    opponentEngineRef.current?.stop()
-    const next = new Chess()
-    commitGame(next, null)
-    setReview([])
-    setAnalysis(null)
-    setEngineError(null)
-    setOpponentThinking(false)
-    setCoachThinking(false)
-    void refreshCoach(next, sessionRef.current)
-  }
-
-  function undoPair() {
-    if (opponentThinking || reviewing || !history.length) return
-    sessionRef.current += 1
-    coachRequestRef.current += 1
-    coachEngineRef.current?.stop()
-    opponentEngineRef.current?.stop()
-
+    requestRef.current += 1
+    engineRef.current?.stop()
     const next = cloneGame(gameRef.current)
     next.undo()
-    if (next.turn() === 'b' && next.history().length) next.undo()
-
     const verbose = next.history({ verbose: true })
     const latest = verbose.at(-1)
     commitGame(next, latest ? { from: latest.from, to: latest.to } : null)
-    setReview([])
     setAnalysis(null)
+    setReview([])
     setEngineError(null)
-    setOpponentThinking(false)
-    setCoachThinking(false)
-    void refreshCoach(next, sessionRef.current)
+    setThinking(false)
+    void analyzePosition(next, playerSide, sessionRef.current)
   }
 
-  async function retryComputer() {
-    if (opponentThinking || gameRef.current.turn() !== 'b' || gameRef.current.isGameOver()) return
-    await playComputer(cloneGame(gameRef.current), sessionRef.current)
+  function resetGame() {
+    if (!playerSide) return
+    startWithSide(playerSide)
   }
 
   async function reviewGame() {
-    const engine = coachEngineRef.current
+    const engine = engineRef.current
+    const side = playerSide
     const source = cloneGame(gameRef.current)
-    if (!engine || !source.history().length || reviewing || opponentThinking) return
+    if (!engine || !side || !source.history().length || reviewing) return
 
-    coachRequestRef.current += 1
+    requestRef.current += 1
     engine.stop()
-    setCoachThinking(false)
+    setThinking(false)
     setReviewing(true)
     setReview([])
     setEngineError(null)
 
     const replay = new Chess()
-    const verbose = source.history({ verbose: true })
+    const moves = source.history({ verbose: true })
     const rows: ReviewMove[] = []
 
     try {
-      for (let index = 0; index < verbose.length; index += 1) {
-        const move = verbose[index]
+      for (let index = 0; index < moves.length; index += 1) {
+        const move = moves[index]
         const mover = replay.turn()
+        const actual = `${move.from}${move.to}${move.promotion ?? ''}`
+
+        if (mover !== side) {
+          replay.move({ from: move.from, to: move.to, promotion: move.promotion })
+          continue
+        }
+
         const before = await engine.analyze(replay.fen(), 11, 1)
         const best = before.bestMove
-        const bestScore = scoreOf(before)
-        const actualUci = `${move.from}${move.to}${move.promotion ?? ''}`
+        const beforeScore = scoreForSide(scoreOf(before), side)
         replay.move({ from: move.from, to: move.to, promotion: move.promotion })
-        const after = replay.isGameOver() ? null : await engine.analyze(replay.fen(), 11, 1)
-        const afterScore = after ? scoreOf(after) : bestScore
-        const rawLoss = mover === 'w' ? bestScore - afterScore : afterScore - bestScore
-        const loss = Math.max(0, Math.round(rawLoss))
+        const afterScore = replay.isGameOver()
+          ? terminalScore(replay, side)
+          : scoreForSide(scoreOf(await engine.analyze(replay.fen(), 11, 1)), side)
+        const loss = Math.max(0, Math.round(beforeScore - afterScore))
+
         rows.push({
           ply: index + 1,
-          color: mover,
           san: move.san,
-          actual: actualUci,
+          actual,
           best,
           loss,
-          label: classify(loss, actualUci === best),
+          label: classify(loss, actual === best),
           eval: afterScore,
         })
         setReview([...rows])
       }
     } catch (error) {
-      setEngineError(error instanceof Error ? error.message : 'A revisão da partida foi interrompida.')
+      setEngineError(error instanceof Error ? error.message : 'A revisão não pôde ser concluída.')
     } finally {
       setReviewing(false)
-      if (!gameRef.current.isGameOver()) void refreshCoach(gameRef.current, sessionRef.current)
+      if (playerSide && !gameRef.current.isGameOver()) void analyzePosition(gameRef.current, playerSide, sessionRef.current)
     }
   }
 
-  const humanReview = review.filter((row) => row.color === 'w')
-  const accuracy = humanReview.length
-    ? Math.max(0, Math.round(100 - humanReview.reduce((sum, row) => sum + Math.min(row.loss, 400), 0) / humanReview.length / 4))
+  const accuracy = review.length
+    ? Math.max(0, Math.round(100 - review.reduce((sum, row) => sum + Math.min(row.loss, 400), 0) / review.length / 4))
     : null
 
-  const status = engineError
-    ? engineError
-    : reviewing
-      ? `Revisando partida… ${review.length}/${history.length}`
-      : opponentThinking
-        ? `Stockfish ${engineElo} está pensando…`
-        : result
-          ? result
-          : game.turn() === 'b'
-            ? 'Aguardando resposta do Stockfish.'
-            : coachThinking
-              ? 'Sua vez — o coach está refinando a dica em segundo plano.'
-              : 'Sua vez.'
+  if (!playerSide) {
+    return (
+      <main className="setup-shell">
+        <section className="setup-card">
+          <div className="brand-mark">XC</div>
+          <span className="eyebrow">STOCKFISH 18 · LOCAL</span>
+          <h1>Escolha o seu lado</h1>
+          <p>Você controlará as duas cores no tabuleiro. O coach calcula avaliação e recomendações sempre pensando no lado que você escolher.</p>
+          <div className="side-options">
+            <button className="side-option white-option" onClick={() => startWithSide('w')}>
+              <span className="side-piece">♔</span>
+              <strong>Jogar pelas brancas</strong>
+              <small>Você recebe a primeira recomendação imediatamente.</small>
+            </button>
+            <button className="side-option black-option" onClick={() => startWithSide('b')}>
+              <span className="side-piece">♚</span>
+              <strong>Jogar pelas pretas</strong>
+              <small>Primeiro mova as brancas; depois o coach calcula sua resposta.</small>
+            </button>
+          </div>
+          <div className="setup-note">Sem adversário automático. Você reproduz os lances das duas cores e o sistema orienta somente o seu lado.</div>
+        </section>
+      </main>
+    )
+  }
+
+  const topLabel = playerSide === 'w' ? 'Pretas · adversário' : 'Brancas · adversário'
+  const bottomLabel = playerSide === 'w' ? 'Brancas · seu lado' : 'Pretas · seu lado'
 
   return (
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-block">
-          <span className="eyebrow">STOCKFISH 18 · 100% LOCAL</span>
-          <h1>Xadrez Coach</h1>
-          <p>Jogue, receba orientação em tempo real e revise suas decisões sem API paga.</p>
+          <div className="brand-mark small">XC</div>
+          <div><span className="eyebrow">ANÁLISE LOCAL</span><h1>Xadrez Coach</h1></div>
         </div>
-        <div className={`engine-status ${engineError ? 'error' : ''}`}>
-          <span className={opponentThinking || coachThinking || reviewing ? 'pulse' : 'dot'} />
-          {status}
+        <div className="top-actions">
+          <button className="ghost-button" onClick={() => setPlayerSide(null)}>Trocar lado</button>
+          <div className={`engine-status ${engineError ? 'error' : ''}`}>
+            <span className={thinking || reviewing ? 'pulse' : 'dot'} />
+            {engineError ? 'Falha na engine' : reviewing ? 'Revisando partida' : thinking ? 'Calculando' : 'Coach pronto'}
+          </div>
         </div>
       </header>
 
+      {engineError && <div className="error-banner"><strong>Stockfish:</strong> {engineError}</div>}
+
       <section className="game-layout">
         <div className="board-column">
-          <div className="player-row opponent-row">
-            <div className="player-identity"><span className="avatar">SF</span><div><strong>Stockfish</strong><small>Adversário</small></div></div>
-            <span className="elo-pill">{engineElo} Elo</span>
-          </div>
+          <div className="player-row opponent-row"><div><span className="player-dot opponent" /><strong>{topLabel}</strong></div><span>Você controla os lances</span></div>
 
-          <div className={`board-wrap ${boardLocked ? 'locked' : ''}`}>
-            <div className="board" role="grid" aria-label="Tabuleiro de xadrez">
-              {SQUARES.map((square, index) => {
+          <div className="board-frame">
+            <div className="board" role="grid" aria-label={`Tabuleiro orientado pelas ${playerSide === 'w' ? 'brancas' : 'pretas'}`}>
+              {boardSquares.map((square, index) => {
                 const piece = game.get(square)
-                const light = (Math.floor(index / 8) + index) % 2 === 0
                 const target = legalTargets.has(square)
-                const isLast = Boolean(lastMove && (lastMove.from === square || lastMove.to === square))
-                const hintedFrom = showHint && bestMove?.slice(0, 2) === square
-                const hintedTo = showHint && bestMove?.slice(2, 4) === square
-                const checked = checkedKing === square
-                const draggable = !boardLocked && piece?.color === 'w'
-
+                const last = lastMove?.from === square || lastMove?.to === square
+                const hintedFrom = hintFrom === square
+                const hintedTo = hintTo === square
+                const row = Math.floor(index / 8)
+                const col = index % 8
                 return (
                   <button
                     key={square}
                     type="button"
-                    className={`square ${light ? 'light' : 'dark'} ${selected === square ? 'selected' : ''} ${target ? 'target' : ''} ${isLast ? 'last-move' : ''} ${hintedFrom ? 'hint-from' : ''} ${hintedTo ? 'hint-to' : ''} ${checked ? 'in-check' : ''}`}
+                    className={`square ${isLightSquare(square) ? 'light' : 'dark'} ${selected === square ? 'selected' : ''} ${target ? 'target' : ''} ${last ? 'last-move' : ''} ${checkedKing === square ? 'checked' : ''} ${hintedFrom ? 'hint-from' : ''} ${hintedTo ? 'hint-to' : ''}`}
                     onClick={() => clickSquare(square)}
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={(event) => dropOnSquare(square, event)}
                     aria-label={square}
-                    aria-pressed={selected === square}
                   >
                     {piece && (
                       <span
                         className={`piece ${piece.color}`}
-                        draggable={draggable}
+                        draggable={!boardLocked && piece.color === game.turn()}
                         onDragStart={(event) => dragStart(square, event)}
                       >
                         {PIECES[`${piece.color}${piece.type}`]}
                       </span>
                     )}
-                    {square[0] === 'a' && <small className="rank">{square[1]}</small>}
-                    {square[1] === '1' && <small className="file">{square[0]}</small>}
+                    {col === 0 && <span className="coord rank-label">{square[1]}</span>}
+                    {row === 7 && <span className="coord file-label">{square[0]}</span>}
                   </button>
                 )
               })}
             </div>
-            {showHint && !opponentThinking && game.turn() === 'w' && <Arrow move={bestMove} />}
-            {opponentThinking && <div className="board-overlay"><span className="spinner" /><strong>Stockfish calculando…</strong></div>}
+            {reviewing && <div className="board-overlay"><span className="spinner" /><strong>Analisando seus lances</strong></div>}
           </div>
 
-          <div className="player-row">
-            <div className="player-identity"><span className="avatar human">VOCÊ</span><div><strong>Você</strong><small>Brancas</small></div></div>
-            <span className="turn-pill">{game.turn() === 'w' && !result ? 'Sua vez' : result ? 'Encerrada' : 'Aguardando'}</span>
+          <div className="player-row my-row"><div><span className="player-dot mine" /><strong>{bottomLabel}</strong></div><span>{isMyTurn ? 'Sua recomendação está ativa' : 'Aguardando o lance adversário'}</span></div>
+
+          <div className="turn-banner">
+            <div>
+              <span className={`turn-chip ${isMyTurn ? 'mine' : 'opponent'}`}>{isMyTurn ? 'SEU LADO' : 'ADVERSÁRIO'}</span>
+              <strong>{result ?? (isMyTurn ? 'Faça o lance recomendado ou escolha outra jogada.' : `Mova manualmente as ${game.turn() === 'w' ? 'brancas' : 'pretas'}.`)}</strong>
+            </div>
+            <span>{game.turn() === 'w' ? 'Brancas jogam' : 'Pretas jogam'}</span>
           </div>
 
           <div className="actions">
-            <button type="button" onClick={resetGame}>Nova partida</button>
-            <button type="button" onClick={undoPair} disabled={!history.length || opponentThinking || reviewing}>Desfazer rodada</button>
-            <button type="button" className="primary" onClick={() => setShowHint((value) => !value)}>{showHint ? 'Ocultar dica' : 'Mostrar dica'}</button>
+            <button onClick={resetGame}>Nova partida</button>
+            <button onClick={undoMove} disabled={!history.length || reviewing}>Desfazer lance</button>
+            <button className="primary" onClick={() => setShowHint((value) => !value)}>{showHint ? 'Ocultar dica' : 'Mostrar dica'}</button>
           </div>
-
-          {engineError && game.turn() === 'b' && !opponentThinking && !game.isGameOver() && (
-            <button type="button" className="retry-button" onClick={retryComputer}>Tentar resposta do Stockfish novamente</button>
-          )}
         </div>
 
         <aside className="coach-panel">
-          <div className="eval-card">
-            <div className="eval-heading"><div><span>Avaliação</span><small>perspectiva das brancas</small></div><strong>{analysis ? displayEval(evalCp) : '—'}</strong></div>
-            <div className="eval-track"><div className="eval-fill" style={{ width: `${Math.max(4, Math.min(96, 50 + evalCp / 20))}%` }} /></div>
-          </div>
+          <section className="eval-card">
+            <div className="card-heading"><div><span className="section-label">AVALIAÇÃO DO SEU LADO</span><strong className="big-eval">{analysis ? displayEval(userEval) : '—'}</strong></div><span className="side-badge">{playerSide === 'w' ? 'Brancas' : 'Pretas'}</span></div>
+            <div className="eval-track"><div className="eval-fill" style={{ width: `${Math.max(4, Math.min(96, 50 + userEval / 20))}%` }} /></div>
+            <small>Positivo significa vantagem para o lado que você escolheu.</small>
+          </section>
 
-          <div className="card coach-card">
-            <div className="card-title"><span className="section-label">MELHOR JOGADA</span>{coachThinking && <span className="mini-loading">refinando…</span>}</div>
-            <h2>{bestMove && game.turn() === 'w' ? `${bestMove.slice(0, 2)} → ${bestMove.slice(2, 4)}` : coachThinking ? 'Calculando…' : '—'}</h2>
-            <p>{analysis && game.turn() === 'w' ? explainMove(game, analysis.bestMove) : 'A dica aparece quando for sua vez e é recalculada após cada resposta do adversário.'}</p>
-          </div>
+          <section className={`card recommendation-card ${isMyTurn ? 'active' : ''}`}>
+            <div className="card-title"><span className="section-label">MELHOR JOGADA PARA VOCÊ</span>{thinking && <span className="mini-loader" />}</div>
+            {isMyTurn ? (
+              <>
+                <div className="move-hero">{bestMove ? <><b>{bestMove.slice(0, 2)}</b><span>→</span><b>{bestMove.slice(2, 4)}</b></> : <span className="muted">Calculando…</span>}</div>
+                <p>{bestMove ? explainMove(game, bestMove) : 'O Stockfish está avaliando a melhor continuação para o seu lado.'}</p>
+              </>
+            ) : (
+              <div className="waiting-coach"><strong>Primeiro mova o adversário</strong><p>Assim que você fizer o lance da outra cor, o coach recalcula a melhor resposta para o seu lado.</p></div>
+            )}
+          </section>
 
-          <div className="card">
-            <div className="card-title"><strong>Linhas candidatas</strong><span>Top 3</span></div>
+          <section className="card">
+            <div className="card-title"><strong>Linhas candidatas</strong><span>{isMyTurn ? 'Top 3' : 'ocultas no turno adversário'}</span></div>
             <div className="lines">
-              {analysis?.lines.length ? analysis.lines.map((line) => (
-                <div className="line" key={line.multipv}>
-                  <b>{line.multipv}</b>
-                  <code title={pvToSan(fen, line.pv)}>{pvToSan(fen, line.pv) || '—'}</code>
-                  <span>{line.mate !== null ? `M${line.mate}` : displayEval(line.scoreCp ?? 0)}</span>
-                </div>
-              )) : <span className="muted">Aguardando uma análise válida da posição atual.</span>}
+              {isMyTurn && analysis?.lines.length ? analysis.lines.map((line) => {
+                const score = line.mate !== null ? scoreForSide(Math.sign(line.mate) * 10000, playerSide) : scoreForSide(line.scoreCp ?? 0, playerSide)
+                return (
+                  <div className="line" key={line.multipv}>
+                    <b>{line.multipv}</b>
+                    <code>{pvToSan(game.fen(), line.pv)}</code>
+                    <span>{line.mate !== null ? (score > 0 ? 'M+' : 'M−') : displayEval(score)}</span>
+                  </div>
+                )
+              }) : <div className="empty-state">As variantes aparecem somente quando é a vez do seu lado.</div>}
             </div>
-          </div>
+          </section>
 
-          <div className="card settings-card">
-            <div className="card-title"><strong>Força do adversário</strong><span>{engineElo}</span></div>
-            <input type="range" min="1320" max="2400" step="40" value={engineElo} onChange={(event) => setEngineElo(Number(event.target.value))} disabled={opponentThinking} />
-            <div className="range-labels"><span>Treino</span><span>Forte</span></div>
-            <small>O nível limita apenas o adversário. O coach continua buscando a melhor continuação.</small>
-          </div>
-
-          <div className="card moves-card">
-            <div className="card-title"><strong>Partida</strong><span>{Math.ceil(history.length / 2)} lances</span></div>
+          <section className="card moves-card">
+            <div className="card-title"><strong>Partida</strong><span>{history.length} meios-lances</span></div>
             <div className="move-list">
-              {history.length ? Array.from({ length: Math.ceil(history.length / 2) }, (_, index) => (
+              {Array.from({ length: Math.ceil(history.length / 2) }, (_, index) => (
                 <div key={index}><b>{index + 1}.</b><span>{history[index * 2] ?? ''}</span><span>{history[index * 2 + 1] ?? ''}</span></div>
-              )) : <span className="muted">A partida ainda não começou.</span>}
+              ))}
+              {!history.length && <div className="empty-state">Nenhum lance registrado.</div>}
             </div>
-            <button className="review-button" type="button" onClick={reviewGame} disabled={!history.length || reviewing || opponentThinking}>{reviewing ? 'Analisando partida…' : 'Analisar partida'}</button>
-          </div>
+            <button className="review-button" onClick={reviewGame} disabled={!history.length || reviewing}>Analisar meus lances</button>
+          </section>
         </aside>
       </section>
 
       {review.length > 0 && (
         <section className="review-section">
-          <div className="review-header">
-            <div><span className="eyebrow">REVISÃO</span><h2>Análise lance a lance</h2><p>A precisão considera apenas seus lances de brancas.</p></div>
-            <div className="accuracy"><span>Precisão estimada</span><strong>{accuracy ?? '—'}{accuracy !== null ? '%' : ''}</strong></div>
-          </div>
+          <div className="review-header"><div><span className="eyebrow">PÓS-PARTIDA</span><h2>Revisão do seu lado</h2></div><div className="accuracy"><span>Precisão estimada</span><strong>{accuracy}%</strong></div></div>
           <div className="review-grid">
             {review.map((row) => (
-              <article className={`review-row ${row.color === 'w' ? 'human-move' : 'engine-move'}`} key={row.ply}>
-                <div className="move-number">{Math.ceil(row.ply / 2)}{row.color === 'b' ? '…' : '.'}</div>
-                <div><strong>{row.san}</strong><small>{row.color === 'w' ? 'Você' : 'Stockfish'} · {row.actual}</small></div>
+              <article className="review-row" key={row.ply}>
+                <div className="move-number">{Math.ceil(row.ply / 2)}{row.ply % 2 === 0 ? '…' : '.'}</div>
+                <div><strong>{row.san}</strong><small>{row.actual}</small></div>
                 <span className={`quality q-${row.label.toLowerCase().replaceAll(' ', '-')}`}>{row.label}</span>
                 <div><small>melhor</small><code>{row.best}</code></div>
                 <div><small>perda</small><strong>{row.loss} cp</strong></div>
@@ -576,18 +557,16 @@ export default function App() {
       )}
 
       {pendingPromotion && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setPendingPromotion(null)}>
-          <div className="promotion-dialog" role="dialog" aria-modal="true" aria-label="Escolha a peça para promoção" onMouseDown={(event) => event.stopPropagation()}>
-            <span className="eyebrow">PROMOÇÃO</span>
-            <h2>Escolha a peça</h2>
-            <div className="promotion-options">
+        <div className="modal-backdrop" onClick={() => setPendingPromotion(null)}>
+          <div className="promotion-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <span className="section-label">PROMOÇÃO</span><h2>Escolha a peça</h2>
+            <div className="promotion-grid">
               {PROMOTIONS.map(({ piece, label }) => (
-                <button key={piece} type="button" onClick={() => executeHumanMove(pendingPromotion.from, pendingPromotion.to, piece)}>
-                  <span>{PIECES[`w${piece}`]}</span><small>{label}</small>
+                <button key={piece} onClick={() => executeMove(pendingPromotion.from, pendingPromotion.to, piece)}>
+                  <span>{PIECES[`${game.turn()}${piece}`]}</span><small>{label}</small>
                 </button>
               ))}
             </div>
-            <button type="button" className="cancel-promotion" onClick={() => setPendingPromotion(null)}>Cancelar</button>
           </div>
         </div>
       )}
