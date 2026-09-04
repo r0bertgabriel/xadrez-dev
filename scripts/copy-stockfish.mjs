@@ -1,15 +1,16 @@
-import { copyFile, mkdir } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { mkdir, copyFile, access } from 'node:fs/promises'
+import { resolve } from 'node:path'
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const source = resolve(root, 'node_modules/stockfish/bin');
-const target = resolve(root, 'public/engine');
+const sourceDir = resolve('node_modules/stockfish/bin')
+const targetDir = resolve('public/stockfish')
+const files = ['stockfish-18-lite-single.js', 'stockfish-18-lite-single.wasm']
 
-await mkdir(target, { recursive: true });
+await mkdir(targetDir, { recursive: true })
 
-for (const file of ['stockfish-18-lite-single.js', 'stockfish-18-lite-single.wasm']) {
-  await copyFile(resolve(source, file), resolve(target, file));
+for (const file of files) {
+  const source = resolve(sourceDir, file)
+  const target = resolve(targetDir, file)
+  await access(source)
+  await copyFile(source, target)
+  console.log(`Stockfish asset copied: ${file}`)
 }
-
-console.log('Stockfish 18 local engine assets prepared.');

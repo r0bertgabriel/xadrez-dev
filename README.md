@@ -1,29 +1,28 @@
 # Xadrez Coach
 
-Interface web para jogar xadrez contra o Stockfish 18 com assistência em tempo real e análise pós-partida, sem LLM e sem APIs pagas.
+Interface web para jogar xadrez com assistência em tempo real de um motor local. O projeto não usa LLM, API paga ou serviço com cobrança por uso: a análise é feita pelo Stockfish 18 em WebAssembly no navegador do usuário.
 
 ## O que já está implementado
 
-- jogo de brancas contra Stockfish 18;
-- validação completa das regras com `chess.js`;
-- Stockfish executado localmente no navegador via WebAssembly/Web Worker;
-- melhor jogada destacada em tempo real;
-- avaliação da posição em centipawns ou mate;
-- histórico em notação algébrica;
-- análise pós-partida lance a lance;
-- classificação de decisões: Excelente, Boa, Imprecisão, Erro e Erro grave;
-- perda de centipawns por jogada;
-- estimativa de precisão da partida;
-- explicações determinísticas baseadas na avaliação do motor, sem LLM;
-- layout responsivo para desktop e mobile.
+- Partida contra Stockfish com força ajustável por Elo.
+- Coach em tempo real com indicação visual da melhor jogada.
+- Top 3 variantes calculadas pelo motor.
+- Barra de avaliação da posição.
+- Explicações heurísticas simples sobre a ideia do melhor lance, sem IA generativa.
+- Destaque de casas legais e melhor jogada no tabuleiro.
+- Histórico da partida.
+- Desfazer uma rodada e reiniciar a partida.
+- Revisão pós-partida lance a lance.
+- Classificação de lances: melhor, excelente, bom, imprecisão, erro e erro grave.
+- Perda aproximada em centipawns e precisão estimada.
+- Interface responsiva para desktop e mobile.
 
 ## Stack
 
-- React 19
-- TypeScript 5
-- Vite 7
-- chess.js 1.4
-- Stockfish.js 18.0.8 (`lite-single`)
+- React 19 + TypeScript
+- Vite
+- `chess.js` para regras, validação e PGN
+- Stockfish 18 via pacote `stockfish` e WebAssembly
 
 ## Como executar
 
@@ -32,21 +31,21 @@ npm install
 npm run dev
 ```
 
-O `postinstall` copia automaticamente os arquivos `stockfish-18-lite-single.js` e `stockfish-18-lite-single.wasm` do pacote npm para `public/engine`.
+Durante o `npm install`, o script `scripts/copy-stockfish.mjs` copia automaticamente o build `stockfish-18-lite-single.js/.wasm` do pacote instalado para `public/stockfish/`. Esses arquivos são ignorados pelo Git porque são artefatos derivados da dependência.
 
-Para build de produção:
+Para gerar a versão de produção:
 
 ```bash
 npm run build
 npm run preview
 ```
 
-## Arquitetura da inteligência
+## Arquitetura
 
-Não há chamada para OpenAI, Anthropic, Gemini ou qualquer API de inferência. O motor Stockfish roda na máquina do próprio usuário. Assim, não existe custo por jogada ou por partida.
+Toda a análise do tabuleiro roda localmente no navegador em um Web Worker. O frontend envia posições FEN ao Stockfish usando o protocolo UCI e recebe avaliação, variantes e melhor lance. Isso mantém a interface responsiva e evita custo por requisição.
 
-A interface usa profundidade 14 para as dicas em tempo real, 13 para o adversário e 12 para a análise pós-partida, equilibrando força e responsividade no navegador.
+O adversário pode ter a força limitada usando `UCI_LimitStrength`/`UCI_Elo`, enquanto o coach continua usando uma análise mais forte. Assim, o usuário pode treinar contra níveis realistas sem perder a qualidade das dicas.
 
-## Observação de licença
+## Observação sobre licença
 
-Stockfish/Stockfish.js é distribuído sob GPLv3. Os binários usados pelo projeto são provenientes do pacote npm `stockfish` e executados em Web Worker dedicado.
+O pacote `stockfish`/Stockfish.js é distribuído sob GPL-3.0. Consulte a licença e os requisitos do projeto original ao distribuir binários derivados do motor.

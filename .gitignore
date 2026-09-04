@@ -1,7 +1,8 @@
 node_modules/
 dist/
-public/engine/
-.DS_Store
+public/stockfish/
 *.log
-.vscode/
-.idea/
+.DS_Store
+.env
+.env.*
+!.env.example

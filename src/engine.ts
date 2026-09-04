@@ -1,119 +1,119 @@
-export type EngineScore = {
-  type: 'cp' | 'mate';
-  value: number;
-};
+export type EngineLine = {
+  multipv: number
+  depth: number
+  scoreCp: number | null
+  mate: number | null
+  pv: string[]
+}
 
 export type EngineAnalysis = {
-  bestMove: string;
-  ponder?: string;
-  depth: number;
-  score: EngineScore;
-  pv: string[];
-};
+  bestMove: string
+  ponder?: string
+  lines: EngineLine[]
+}
 
-type Waiter = {
-  test: (line: string) => boolean;
-  resolve: (line: string) => void;
-};
-
-const ENGINE_URL = '/engine/stockfish-18-lite-single.js';
+type Pending = {
+  resolve: (value: EngineAnalysis) => void
+  reject: (reason?: unknown) => void
+  lines: Map<number, EngineLine>
+  fen: string
+}
 
 export class StockfishEngine {
-  private worker: Worker;
-  private waiters: Waiter[] = [];
-  private lastInfo = '';
-  private queue: Promise<unknown> = Promise.resolve();
-  private initialized: Promise<void>;
+  private worker: Worker
+  private ready: Promise<void>
+  private pending: Pending | null = null
+  private queue: Promise<unknown> = Promise.resolve()
 
   constructor() {
-    this.worker = new Worker(ENGINE_URL);
-    this.worker.onmessage = (event: MessageEvent<string>) => {
-      const line = String(event.data ?? '');
-      if (line.startsWith('info ') && line.includes(' score ')) this.lastInfo = line;
-
-      const waiterIndex = this.waiters.findIndex((waiter) => waiter.test(line));
-      if (waiterIndex >= 0) {
-        const [waiter] = this.waiters.splice(waiterIndex, 1);
-        waiter.resolve(line);
+    this.worker = new Worker('/stockfish/stockfish-18-lite-single.js')
+    this.worker.onmessage = (event) => this.handleMessage(String(event.data))
+    this.ready = new Promise((resolve) => {
+      const listener = (event: MessageEvent) => {
+        if (String(event.data) === 'uciok') {
+          this.worker.removeEventListener('message', listener)
+          this.worker.postMessage('isready')
+        }
+        if (String(event.data) === 'readyok') {
+          this.worker.removeEventListener('message', listener)
+          resolve()
+        }
       }
-    };
-
-    this.initialized = this.initialize();
+      this.worker.addEventListener('message', listener)
+      this.worker.postMessage('uci')
+    })
   }
 
-  private send(command: string) {
-    this.worker.postMessage(command);
+  analyze(fen: string, depth = 15, multiPv = 3): Promise<EngineAnalysis> {
+    return this.enqueue(async () => {
+      await this.ready
+      this.worker.postMessage('stop')
+      this.worker.postMessage(`setoption name MultiPV value ${Math.max(1, Math.min(5, multiPv))}`)
+      this.worker.postMessage(`position fen ${fen}`)
+      return new Promise<EngineAnalysis>((resolve, reject) => {
+        this.pending = { resolve, reject, lines: new Map(), fen }
+        this.worker.postMessage(`go depth ${depth}`)
+      })
+    })
   }
 
-  private waitFor(test: (line: string) => boolean) {
-    return new Promise<string>((resolve) => this.waiters.push({ test, resolve }));
+  bestMove(fen: string, elo = 1400, moveTimeMs = 450): Promise<string> {
+    return this.enqueue(async () => {
+      await this.ready
+      this.worker.postMessage('stop')
+      this.worker.postMessage('setoption name MultiPV value 1')
+      this.worker.postMessage('setoption name UCI_LimitStrength value true')
+      this.worker.postMessage(`setoption name UCI_Elo value ${Math.max(1320, Math.min(3190, elo))}`)
+      this.worker.postMessage(`position fen ${fen}`)
+      const result = await new Promise<EngineAnalysis>((resolve, reject) => {
+        this.pending = { resolve, reject, lines: new Map(), fen }
+        this.worker.postMessage(`go movetime ${moveTimeMs}`)
+      })
+      this.worker.postMessage('setoption name UCI_LimitStrength value false')
+      return result.bestMove
+    })
   }
 
-  private async initialize() {
-    this.send('uci');
-    await this.waitFor((line) => line === 'uciok');
-    this.send('setoption name Hash value 32');
-    this.send('isready');
-    await this.waitFor((line) => line === 'readyok');
+  destroy() {
+    this.worker.terminate()
   }
 
-  analyze(fen: string, depth = 14): Promise<EngineAnalysis> {
-    const task = async () => {
-      await this.initialized;
-      this.lastInfo = '';
-      this.send('position fen ' + fen);
-      this.send('go depth ' + depth);
-      const bestLine = await this.waitFor((line) => line.startsWith('bestmove '));
-      return this.parseAnalysis(bestLine, this.lastInfo);
-    };
-
-    const result = this.queue.then(task, task);
-    this.queue = result.catch(() => undefined);
-    return result;
+  private enqueue<T>(job: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(job, job)
+    this.queue = next.then(() => undefined, () => undefined)
+    return next
   }
 
-  private parseAnalysis(bestLine: string, infoLine: string): EngineAnalysis {
-    const bestParts = bestLine.trim().split(/\s+/);
-    const bestMove = bestParts[1] ?? '';
-    const ponderIndex = bestParts.indexOf('ponder');
-    const ponder = ponderIndex >= 0 ? bestParts[ponderIndex + 1] : undefined;
+  private handleMessage(message: string) {
+    if (!this.pending) return
 
-    const depth = Number(infoLine.match(/\bdepth (\d+)/)?.[1] ?? 0);
-    const scoreMatch = infoLine.match(/\bscore (cp|mate) (-?\d+)/);
-    const pvMatch = infoLine.match(/\bpv (.+)$/);
+    if (message.startsWith('info ') && message.includes(' pv ')) {
+      const multipv = Number(message.match(/\bmultipv (\d+)/)?.[1] ?? '1')
+      const depth = Number(message.match(/\bdepth (\d+)/)?.[1] ?? '0')
+      const cpMatch = message.match(/\bscore cp (-?\d+)/)
+      const mateMatch = message.match(/\bscore mate (-?\d+)/)
+      const pvRaw = message.split(' pv ')[1] ?? ''
+      const sideToMove = this.pending.fen.split(' ')[1]
+      const perspective = sideToMove === 'w' ? 1 : -1
+      this.pending.lines.set(multipv, {
+        multipv,
+        depth,
+        scoreCp: cpMatch ? Number(cpMatch[1]) * perspective : null,
+        mate: mateMatch ? Number(mateMatch[1]) * perspective : null,
+        pv: pvRaw.trim().split(/\s+/).filter(Boolean),
+      })
+      return
+    }
 
-    return {
-      bestMove,
-      ponder,
-      depth,
-      score: {
-        type: (scoreMatch?.[1] as 'cp' | 'mate') ?? 'cp',
-        value: Number(scoreMatch?.[2] ?? 0),
-      },
-      pv: pvMatch?.[1]?.trim().split(/\s+/) ?? [],
-    };
+    if (message.startsWith('bestmove ')) {
+      const [, bestMove, , ponder] = message.split(/\s+/)
+      const pending = this.pending
+      this.pending = null
+      pending.resolve({
+        bestMove,
+        ponder,
+        lines: [...pending.lines.values()].sort((a, b) => a.multipv - b.multipv),
+      })
+    }
   }
-
-  terminate() {
-    this.worker.terminate();
-    this.waiters = [];
-  }
-}
-
-export function scoreToWhite(score: EngineScore, fen: string): number {
-  const sideToMove = fen.split(' ')[1];
-  const raw = score.type === 'mate'
-    ? Math.sign(score.value || 1) * (100_000 - Math.min(Math.abs(score.value), 99) * 100)
-    : score.value;
-  return sideToMove === 'w' ? raw : -raw;
-}
-
-export function displayEvaluation(score: EngineScore, fen: string): string {
-  const normalized = scoreToWhite(score, fen);
-  if (score.type === 'mate') {
-    const moves = Math.abs(score.value);
-    return normalized > 0 ? `M${moves} para as brancas` : `M${moves} para as pretas`;
-  }
-  const pawns = normalized / 100;
-  return `${pawns >= 0 ? '+' : ''}${pawns.toFixed(2)}`;
 }
