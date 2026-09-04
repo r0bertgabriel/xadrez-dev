@@ -1,0 +1,7 @@
+node_modules/
+dist/
+public/engine/
+.DS_Store
+*.log
+.vscode/
+.idea/
